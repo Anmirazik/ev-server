@@ -5,16 +5,14 @@ networks:
       name: evse_ev_network
 services:
   mongo-express:
-    image: mongo-express
+    image: mongo-express:0.54
     restart: always
     ports:
     - 8091:8081
     environment:
-      ME_CONFIG_MONGODB_ADMINUSERNAME: admin
-      ME_CONFIG_MONGODB_ADMINPASSWORD: admin
+      ME_CONFIG_MONGODB_ADMINUSERNAME: evse-admin
+      ME_CONFIG_MONGODB_ADMINPASSWORD: evse-admin-pwd
       ME_CONFIG_MONGODB_SERVER: mongodb
-      ME_CONFIG_MONGODB_AUTH_DATABASE: admin
-      ME_CONFIG_MONGODB_AUTH_USERNAME: admin-user
-      ME_CONFIG_MONGODB_AUTH_PASSWORD: admin-user-pwd
+      ME_CONFIG_MONGODB_PORT: 27017
     networks:
     - ev_network

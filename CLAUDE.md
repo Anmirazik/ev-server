@@ -125,6 +125,21 @@ cd docker && make server SUBMODULES_INIT=false # ev-server container only
 4. **mongo-express** — MongoDB web UI (browser DB viewer)
 5. **ev-server** — the Node.js backend itself
 
+### WSL2 prerequisite — disable userland proxy
+
+On WSL2, Docker's fallback `docker-proxy` has a bug where it assigns the wrong container IP, breaking port forwarding for some containers (e.g. mongo-express on 8091). Fix once per machine:
+
+```bash
+sudo nano /etc/docker/daemon.json
+```
+Set content to:
+```json
+{"userland-proxy": false}
+```
+Then: `sudo service docker restart`
+
+This is a one-time setup. Pure Linux does not need this.
+
 ### Clean start / reset
 
 ```bash

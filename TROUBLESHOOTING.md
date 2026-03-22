@@ -126,6 +126,40 @@ docker-compose -p evse -f docker-compose-server.yml up -d
 
 ---
 
+## 6. Mongo Express Unreachable — `ERR_EMPTY_RESPONSE` on localhost:8091
+
+**Symptom:** All other containers (ev-server, maildev, MongoDB) are accessible, but `http://localhost:8091` returns `ERR_EMPTY_RESPONSE` or `Connection reset by peer`. The container is running and shows `Database connected` in its logs.
+
+**Cause:** On WSL2, Docker's `iptables` defaults to the `nftables` backend. When iptables rules fail silently for a port, Docker falls back to spawning a `docker-proxy` userspace process. That proxy has a bug on WSL2 where it gets assigned the wrong container IP — in this case MongoDB's IP (`172.18.0.2`) instead of mongo-express's IP. Every request to port 8091 was forwarded to MongoDB, which speaks no HTTP and resets the connection.
+
+Diagnosis — the proxy pointing to the wrong container:
+```bash
+ps aux | grep docker-proxy | grep 8091
+# shows: -container-ip 172.18.0.2  ← MongoDB's IP, not mongo-express
+
+docker inspect evse_mongo-express_1 --format '{{.NetworkSettings.Networks.evse_ev_network.IPAddress}}'
+# shows: 172.18.0.4  ← the actual mongo-express IP
+```
+
+**Fix:** Disable the userland proxy so Docker uses iptables exclusively (which already works for all other containers):
+
+```bash
+sudo nano /etc/docker/daemon.json
+```
+Enter:
+```json
+{"userland-proxy": false}
+```
+Save, then:
+```bash
+sudo service docker restart
+cd /home/annasdzik/open-e-mobility/ev-server/docker && make SUBMODULES_INIT=false
+```
+
+No more `docker-proxy` processes are spawned — iptables handles all port forwarding directly.
+
+---
+
 ## Expected Healthy Startup Log
 
 When everything is working correctly you should see:
