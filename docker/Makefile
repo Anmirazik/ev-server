@@ -13,7 +13,7 @@ default: all
 mongo-express:
 	docker-compose -p $(PROJECT_NAME) -f docker-compose-mongo-express.yml up -d
 
-local-env: mongo-express
+local-env:
 	docker-compose -p $(PROJECT_NAME) -f docker-compose-local-env.yml up -d
 
 submodule-update:
@@ -36,7 +36,7 @@ $(NAME)-standalone: $(submodules-init)
 $(NAME)-standalone-force: $(submodules-init)
 	docker-compose -p $(PROJECT_NAME) -f docker-compose-$(NAME)-standalone.yml up -d --build --force-recreate
 
-all: local-env $(NAME)
+all: local-env mongo-express $(NAME)
 
 clean-mongo-express-container:
 	-docker-compose -p $(PROJECT_NAME) -f docker-compose-mongo-express.yml down

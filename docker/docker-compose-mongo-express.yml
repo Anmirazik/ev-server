@@ -1,7 +1,8 @@
 version: "3.7"
 networks:
   ev_network:
-    driver: bridge
+    external:
+      name: evse_ev_network
 services:
   mongo-express:
     image: mongo-express

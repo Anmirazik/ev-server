@@ -62,10 +62,12 @@
     "debug": false
   },
   "WSDLEndpoint": {
-    "baseUrl": "http://server:8000"
+    "baseUrl": "http://server:8000",
+    "baseSecureUrl": ""
   },
   "JsonEndpoint": {
-    "baseUrl": "ws://server:8010"
+    "baseUrl": "ws://server:8010",
+    "baseSecureUrl": ""
   },
   "OCPIEndpoint": {
     "baseUrl": "http://server:9090"
@@ -76,14 +78,8 @@
   },
   "Storage": {
     "implementation": "mongodb",
-    "uri": null,
-    "host": "mongodb",
-    "port": 27017,
-    "user": "evse-user",
-    "password": "evse-user-pwd",
-    "database": "evse",
+    "uri": "mongodb://evse-user:evse-user-pwd@mongodb:27017/evse?replicaSet=rs0",
     "poolSize": 200,
-    "replicaSet": "rs0",
     "debug": false
   },
   "Axios": {
