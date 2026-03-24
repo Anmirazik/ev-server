@@ -127,27 +127,40 @@ cd docker && make server SUBMODULES_INIT=false # ev-server container only
 
 ### WSL2 prerequisite — disable userland proxy
 
-On WSL2, Docker's fallback `docker-proxy` has a bug where it assigns the wrong container IP, breaking port forwarding for some containers (e.g. mongo-express on 8091). Fix once per machine:
+On WSL2, Docker's fallback `docker-proxy` has a bug where it assigns the wrong container IP, breaking **both** host port forwarding and container-to-container networking on bridge networks. Symptoms:
+- `evse_enablereplset_1` exits with code 1 — times out trying to reach `ev_mongo:27017`
+- Replica set never initializes → ev-server gets `MongoServerSelectionError` on startup
+
+Fix once per machine:
 
 ```bash
-sudo nano /etc/docker/daemon.json
+echo '{"userland-proxy": false}' | sudo tee /etc/docker/daemon.json
+sudo service docker restart
 ```
-Set content to:
-```json
-{"userland-proxy": false}
-```
-Then: `sudo service docker restart`
 
-This is a one-time setup. Pure Linux does not need this.
+Then do a full clean restart (see below). This is a one-time setup — pure Linux does not need this.
 
 ### Clean start / reset
 
 ```bash
 cd docker && make clean
-docker network rm evse_ev_network
+make clean-mongo-data          # wipe DB volume so init scripts re-run on next start
+docker network rm evse_ev_network 2>/dev/null || true
 docker network prune -f
 make SUBMODULES_INIT=false
 ```
+
+> **`make clean-mongo-data` is required** after any broken first-start. MongoDB's `docker-entrypoint-initdb.d/` scripts only run on an empty data volume. If the volume exists from a failed previous run, the init scripts are skipped and users/seed data will be missing.
+
+### Known Docker init bugs (already fixed in this repo)
+
+These bugs existed in the original upstream code and have been patched:
+
+| File | Bug | Fix applied |
+|---|---|---|
+| `docker/initdb/createMongoUsers.sh` | Used `docker exec` inside the container — Docker CLI doesn't exist in the mongo image | Replaced with direct `mongo` call |
+| `docker/initdb/createMongoUsers.sh` | Duplicated user creation already done by `000_createMongoUsers.js` — crashed with "user already exists" on every run | Added `db.getUser()` and `findOne()` guards to skip if already exists |
+| `docker/ev_mongo.Dockerfile` | Used `flip -u` to convert line endings — fails with "binary file" on any non-ASCII or encoding-sensitive file | Replaced with `sed -i 's/\r$//'` which is equivalent but never rejects files |
 
 ---
 

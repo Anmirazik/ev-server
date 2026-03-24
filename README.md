@@ -469,6 +469,12 @@ In a console, start the application (rebuild and restarts if any changes is dete
 npm run start:dev
 ```
 
+Start with the Node.js inspector for debugging:
+
+```shell
+npm run start:dev:debug
+```
+
 You can also start the application with the standard nodejs profiler:
 
 ```shell
@@ -519,6 +525,31 @@ Depending on the need it is possible to start different docker containers.
 
 Each following command has to be executed in folder [docker](./docker).
 
+#### WSL2 prerequisite — disable userland proxy
+
+On WSL2, Docker's fallback `docker-proxy` has a bug where it assigns the wrong container IP, breaking **both** host port forwarding and container-to-container networking on bridge networks. Symptoms:
+- `evse_enablereplset_1` exits with code 1 — times out trying to reach `ev_mongo:27017`
+- Replica set never initializes → ev-server gets `MongoServerSelectionError` on startup
+
+Fix once per machine:
+
+```bash
+echo '{"userland-proxy": false}' | sudo tee /etc/docker/daemon.json
+sudo service docker restart
+```
+
+Then do a full clean restart (see Clean start / reset below). This is a one-time setup — pure Linux and macOS do not need this.
+
+#### Docker container ports
+
+| Container | Port | What it is |
+|-----------|------|------------|
+| MongoDB | 27017 | Database |
+| MailDev SMTP | 1025 | ev-server sends emails here (configure in `config.json`) |
+| MailDev Web UI | 1080 | Open in browser to read captured emails → http://localhost:1080 |
+| Mongo Express | 8091 | Open in browser to browse the DB → http://localhost:8091 |
+| Swagger UI | 8081 | REST API docs → http://localhost:8081/v1/docs |
+
 #### Minimal local environment
 It consist in starting a pre configured empty mongo database plus a mail service and mongo express.
 To start it, execute command:
@@ -543,7 +574,7 @@ The default login/password on the master tenant is super.admin@ev.com/Super.admi
 In case of UI development or test purpose, the server has been containerized.
 To start it, execute command:
 ```bash
-make server
+make server SUBMODULES_INIT=false
 ```
 In order to rebuild the image in case of changes:
 ```bash
@@ -569,13 +600,157 @@ make clean-mongo-express-container
 #### All in one
 It is possible to build and start all containers in one command:
 ```bash
-make
-```
-Or without the optional git submodules:
-```bash
 make SUBMODULES_INIT=false
 ```
+
+> **Always use `SUBMODULES_INIT=false`** — the submodules (`ev-sap-charging-station-templates`, `ev-aws`, `ev-ci`) are private SAP repositories that are not publicly accessible. Without this flag `make` will attempt to clone them and fail.
+
 That Makefile option works for all targets.
+
+The `make` (default `all`) target starts **5 containers** in order:
+1. **MongoDB** — the database
+2. **enable-replset** — one-shot container that runs `rs.initiate()` to activate the replica set
+3. **MailDev** — fake SMTP server that catches all outgoing emails (web UI at port 1080)
+4. **mongo-express** — MongoDB web UI (browser DB viewer at port 8091)
+5. **ev-server** — the Node.js backend itself
+
+#### Clean start / reset
+
+If containers are in a broken state, do a full clean reset:
+
+```bash
+cd docker && make clean
+make clean-mongo-data
+docker network rm evse_ev_network 2>/dev/null || true
+docker network prune -f
+make SUBMODULES_INIT=false
+```
+
+> **`make clean-mongo-data` is required** after any broken first-start. MongoDB's `docker-entrypoint-initdb.d/` scripts only run on an empty data volume. If the volume exists from a failed previous run, the init scripts are skipped and users/seed data will be missing.
+
+#### Known Docker init bugs (already fixed in this repo)
+
+These bugs existed in the original upstream code and have been patched:
+
+| File | Bug | Fix applied |
+|---|---|---|
+| `docker/initdb/createMongoUsers.sh` | Used `docker exec` inside the container — Docker CLI doesn't exist in the mongo image | Replaced with direct `mongo` call |
+| `docker/initdb/createMongoUsers.sh` | Duplicated user creation already done by `000_createMongoUsers.js` — crashed with "user already exists" on every run | Added `db.getUser()` and `findOne()` guards to skip if already exists |
+| `docker/ev_mongo.Dockerfile` | Used `flip -u` to convert line endings — fails with "binary file" on any encoding-sensitive file | Replaced with `sed -i 's/\r$//'` which is equivalent but never rejects files |
+
+## Cross-Repo Connection: ev-server ↔ ev-dashboard
+
+The ev-dashboard Angular frontend talks **only** to ev-server's REST API. There is no WebSocket connection from the dashboard — it polls HTTP every 10 seconds (`pollIntervalSecs` in dashboard config).
+
+### Config Alignment (must match on both sides)
+
+| ev-server `config.json` key | ev-dashboard `config.json` key | Purpose |
+|-----------------------------|-------------------------------|---------|
+| `CentralSystemRestService.protocol` | `CentralSystemServer.protocol` | http or https |
+| `CentralSystemRestService.host` | `CentralSystemServer.host` | Backend hostname |
+| `CentralSystemRestService.port` | `CentralSystemServer.port` | Backend port (Docker: 8081) |
+| `CentralSystemFrontEnd.protocol/host/port` | (dashboard's own URL) | Used by ev-server in email links that point back to the dashboard |
+| `CentralSystemRestService.userTokenKey` | (secret — not in dashboard) | JWT signing secret (dashboard only decodes, never signs) |
+| `CentralSystemRestService.captchaSecretKey` | `User.captchaSiteKey` | reCAPTCHA — server key and site key are a matching pair from Google |
+
+### JWT Token Contract
+
+ev-server signs the token; ev-dashboard decodes it. If you add/rename/remove claims, update both sides.
+
+**Current claims** (`src/server/rest/v1/service/AuthService.ts` → `src/app/services/central-server.service.ts`):
+- `tenantID` — Tenant identifier
+- `userID` — User ID
+- `role` — Single char: `S` (SuperAdmin), `A` (Admin), `B` (Basic), `D` (Demo)
+- `currency` — ISO currency code
+- `language` — Language code
+- `locale` — Locale string
+
+**If you change JWT claims on ev-server:**
+→ Update `currentUser` references in `ev-dashboard/src/app/services/central-server.service.ts`
+→ Update `UserToken` interface in `ev-dashboard/src/app/types/User.ts`
+→ Update `AuthorizationService` in ev-dashboard if role values change
+
+### API Endpoint Contract
+
+All REST routes are defined in ev-server and consumed by name in ev-dashboard.
+
+| ev-server file | ev-dashboard file | What it defines |
+|---|---|---|
+| `src/server/rest/v1/router/api/*.ts` | `src/app/types/Server.ts` (RESTServerRoute enum) | URL paths for every endpoint |
+| `src/server/rest/v1/service/*.ts` | `src/app/services/central-server.service.ts` | Request/response handling |
+| `src/types/*.ts` | `src/app/types/*.ts` | Shared data models |
+
+**If you add a new endpoint on ev-server:**
+1. Add route in the appropriate `src/server/rest/v1/router/api/` file
+2. Add handler in `src/server/rest/v1/service/` with RBAC checks
+3. → Add the route constant to `ev-dashboard/src/app/types/Server.ts` (`RESTServerRoute` enum)
+4. → Add the method to `ev-dashboard/src/app/services/central-server.service.ts`
+
+**If you rename or remove an endpoint on ev-server:**
+1. → Update/remove the matching entry in `ev-dashboard/src/app/types/Server.ts`
+2. → Update/remove the matching method in `ev-dashboard/src/app/services/central-server.service.ts`
+3. → Search ev-dashboard for all callers of that method
+
+### Data Model Sync
+
+TypeScript types are **duplicated** between the two repos (no shared package). They must be kept in sync manually.
+
+| ev-server `src/types/` | ev-dashboard `src/app/types/` |
+|---|---|
+| `ChargingStation.ts` | `ChargingStation.ts` |
+| `Transaction.ts` | `Transaction.ts` |
+| `User.ts` | `User.ts` |
+| `Tag.ts` | `Tag.ts` |
+| `Asset.ts` | `Asset.ts` |
+| `Billing.ts` | `Billing.ts` |
+| `Car.ts` | `Car.ts` |
+| `Authorization.ts` | `Authorization.ts` |
+
+**If you add/rename/remove a field on a model in ev-server:**
+→ Apply the same change to the matching file in `ev-dashboard/src/app/types/`
+→ Search ev-dashboard for all usages of the old field name
+
+### Response Envelope Format
+
+ev-server REST responses follow a consistent envelope. ev-dashboard assumes this shape everywhere.
+
+```typescript
+// List responses
+{ count: number, result: T[] }
+
+// Single-item / action responses
+{ id?: string, status?: string, ...fields }
+```
+
+Changing this envelope shape will break ev-dashboard's table/pagination components.
+
+### HTTP Headers
+
+ev-dashboard sends these headers on every authenticated request:
+- `Authorization: Bearer <jwt>` — checked by Passport JWT strategy in ev-server
+- `Content-Type: application/json`
+- `Tenant: <tenantID>` — used for multi-tenant routing in ev-server
+
+**If ev-server starts requiring a new header**, add it in `central-server.service.ts` → `buildHttpHeaders()`.
+
+### CORS
+
+ev-server enables CORS globally via `cors()` in `ExpressUtils.ts` (currently allows all origins). If you restrict CORS origins, add the dashboard's URL to the allowed list.
+
+### What to check when making changes
+
+| You change this in ev-server | Check in ev-dashboard |
+|---|---|
+| Add/rename/remove REST endpoint | `src/app/types/Server.ts` + `central-server.service.ts` |
+| Change JWT claims | `src/app/types/User.ts` (UserToken) + `central-server.service.ts` (loginSucceeded) |
+| Add/rename field on a shared model | Matching file in `src/app/types/` |
+| Change user role values | `src/app/types/User.ts` + `authorization.service.ts` |
+| Change REST port/host in config | `CentralSystemServer` in ev-dashboard `config.json` |
+| Change `CentralSystemFrontEnd` | Dashboard's own base URL (affects email links) |
+| Change reCAPTCHA server key | `User.captchaSiteKey` (site key) must be from the same Google reCAPTCHA pair |
+| Change response envelope shape | Table/data-source components in `src/app/shared/table/` |
+
+---
 
 ## Architecture
 
