@@ -169,3 +169,134 @@ Requires `test/config/local.json` (copy from `test/config-template.json`) with s
 `src/assets/config.json` — never committed, always local. Templates:
 - `src/assets/config-template-http.json`
 - `src/assets/config-template-https.json`
+
+---
+
+## Cross-Repo Connection: ev-server ↔ ev-dashboard
+
+The ev-dashboard Angular frontend talks **only** to ev-server's REST API. There is no WebSocket connection from the dashboard — it polls HTTP every 10 seconds (`pollIntervalSecs` in dashboard config).
+
+### Config Alignment (must match on both sides)
+
+| ev-server `config.json` key | ev-dashboard `config.json` key | Purpose |
+|-----------------------------|-------------------------------|---------|
+| `CentralSystemRestService.protocol` | `CentralSystemServer.protocol` | http or https |
+| `CentralSystemRestService.host` | `CentralSystemServer.host` | Backend hostname |
+| `CentralSystemRestService.port` | `CentralSystemServer.port` | Backend port (Docker: 8081) |
+| `CentralSystemFrontEnd.protocol/host/port` | (dashboard's own URL) | Used by ev-server in email links that point back to the dashboard |
+| `CentralSystemRestService.userTokenKey` | (secret — not in dashboard) | JWT signing secret (dashboard only decodes, never signs) |
+| `CentralSystemRestService.captchaSecretKey` | `User.captchaSiteKey` | reCAPTCHA — server key and site key are a pair from Google |
+
+### JWT Token Contract
+
+ev-server signs the token; ev-dashboard decodes it. If you add/rename/remove claims, update both sides.
+
+**Current claims** (`src/server/rest/v1/service/AuthService.ts` → `src/app/services/central-server.service.ts`):
+- `tenantID` — Tenant identifier
+- `userID` — User ID
+- `role` — Single char: `S` (SuperAdmin), `A` (Admin), `B` (Basic), `D` (Demo)
+- `currency` — ISO currency code
+- `language` — Language code
+- `locale` — Locale string
+
+**If you change JWT claims on ev-server:**
+→ Update `currentUser` references in `ev-dashboard/src/app/services/central-server.service.ts`
+→ Update `UserToken` interface in `ev-dashboard/src/app/types/User.ts`
+→ Update `AuthorizationService` in ev-dashboard if role values change
+
+### API Endpoint Contract
+
+All REST routes are defined in ev-server and consumed by name in ev-dashboard.
+
+| ev-server file | ev-dashboard file | What it defines |
+|---|---|---|
+| `src/server/rest/v1/router/api/*.ts` | `src/app/types/Server.ts` (RESTServerRoute enum) | URL paths for every endpoint |
+| `src/server/rest/v1/service/*.ts` | `src/app/services/central-server.service.ts` | Request/response handling |
+| `src/types/*.ts` | `src/app/types/*.ts` | Shared data models |
+
+**If you add a new endpoint on ev-server:**
+1. Add route in the appropriate `src/server/rest/v1/router/api/` file
+2. Add handler in `src/server/rest/v1/service/` with RBAC checks
+3. → Add the route constant to `ev-dashboard/src/app/types/Server.ts` (`RESTServerRoute` enum)
+4. → Add the method to `ev-dashboard/src/app/services/central-server.service.ts`
+
+**If you rename or remove an endpoint on ev-server:**
+1. → Update/remove the matching entry in `ev-dashboard/src/app/types/Server.ts`
+2. → Update/remove the matching method in `ev-dashboard/src/app/services/central-server.service.ts`
+3. → Search ev-dashboard for all callers of that method
+
+### Data Model Sync
+
+TypeScript types are **duplicated** between the two repos (no shared package). They must be kept in sync manually.
+
+| ev-server `src/types/` | ev-dashboard `src/app/types/` |
+|---|---|
+| `ChargingStation.ts` | `ChargingStation.ts` |
+| `Transaction.ts` | `Transaction.ts` |
+| `User.ts` | `User.ts` |
+| `Tag.ts` | `Tag.ts` |
+| `Asset.ts` | `Asset.ts` |
+| `Billing.ts` | `Billing.ts` |
+| `Car.ts` | `Car.ts` |
+| `Authorization.ts` | `Authorization.ts` |
+
+**If you add/rename/remove a field on a model in ev-server:**
+→ Apply the same change to the matching file in `ev-dashboard/src/app/types/`
+→ Search ev-dashboard for all usages of the old field name
+
+### Authorization Roles
+
+ev-server defines roles as single chars; ev-dashboard maps them to display names.
+
+| ev-server role char | ev-dashboard constant | Access level |
+|---|---|---|
+| `S` | `SUPER_ADMIN` | Full system + tenant management |
+| `A` | `ADMIN` | Tenant admin |
+| `B` | `BASIC` | Standard user |
+| `D` | `DEMO` | Demo user (read-only) |
+
+**If you add a new role on ev-server:**
+→ Add the char in `src/types/User.ts` (`UserRole` enum) on ev-server
+→ Add the constant in `ev-dashboard/src/app/types/User.ts`
+→ Update `AuthorizationService` in ev-dashboard to handle the new role
+→ Update RBAC rules in ev-server `src/authorization/Authorizations.ts`
+
+### Response Envelope Format
+
+ev-server REST responses follow a consistent envelope. ev-dashboard assumes this shape everywhere.
+
+```typescript
+// List responses
+{ count: number, result: T[] }
+
+// Single-item / action responses
+{ id?: string, status?: string, ...fields }
+```
+
+Changing this envelope shape will break ev-dashboard's table/pagination components.
+
+### HTTP Headers
+
+ev-dashboard sends these headers on every authenticated request:
+- `Authorization: Bearer <jwt>` — checked by Passport JWT strategy in ev-server
+- `Content-Type: application/json`
+- `Tenant: <tenantID>` — used for multi-tenant routing in ev-server
+
+**If ev-server starts requiring a new header**, add it in `central-server.service.ts` → `buildHttpHeaders()`.
+
+### CORS
+
+ev-server enables CORS globally via `cors()` in `ExpressUtils.ts` (currently allows all origins). If you restrict CORS origins, add the dashboard's URL to the allowed list.
+
+### What to check when making changes
+
+| You change this in ev-server | Check in ev-dashboard |
+|---|---|
+| Add/rename/remove REST endpoint | `src/app/types/Server.ts` + `central-server.service.ts` |
+| Change JWT claims | `src/app/types/User.ts` (UserToken) + `central-server.service.ts` (loginSucceeded) |
+| Add/rename field on a shared model | Matching file in `src/app/types/` |
+| Change user role values | `src/app/types/User.ts` + `authorization.service.ts` |
+| Change REST port/host in config | `CentralSystemServer` in ev-dashboard `config.json` |
+| Change `CentralSystemFrontEnd` | Dashboard's own base URL (affects email links) |
+| Change reCAPTCHA server key | `User.captchaSiteKey` (site key) must be from the same Google reCAPTCHA pair |
+| Change response envelope shape | Table/data-source components in `src/app/shared/table/` |
